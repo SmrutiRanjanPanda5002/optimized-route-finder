@@ -4,17 +4,29 @@ import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
 import { Graph, Point, Route } from '@/utils/routeOptimization';
 import { toast } from '@/components/ui/use-toast';
+import { MapPin, Navigation } from 'lucide-react';
 
 interface MapProps {
   graph: Graph;
   route: Route | null;
   mapboxToken: string;
+  onLocationSelect?: (lng: number, lat: number, type: 'start' | 'destination') => void;
+  userLocation?: { lng: number, lat: number } | null;
 }
 
-const Map: React.FC<MapProps> = ({ graph, route, mapboxToken }) => {
+const Map: React.FC<MapProps> = ({ 
+  graph, 
+  route, 
+  mapboxToken, 
+  onLocationSelect,
+  userLocation
+}) => {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<mapboxgl.Map | null>(null);
   const [mapReady, setMapReady] = useState(false);
+  const [selectionMode, setSelectionMode] = useState<'start' | 'destination' | null>(null);
+  const userLocationMarkerRef = useRef<mapboxgl.Marker | null>(null);
+  const markersRef = useRef<mapboxgl.Marker[]>([]);
 
   // Initialize map
   useEffect(() => {
@@ -23,10 +35,14 @@ const Map: React.FC<MapProps> = ({ graph, route, mapboxToken }) => {
     try {
       mapboxgl.accessToken = mapboxToken;
       
+      const initialCenter = userLocation ? 
+        [userLocation.lng, userLocation.lat] : 
+        [-74.006, 40.7128];
+      
       const newMap = new mapboxgl.Map({
         container: mapContainer.current,
-        style: 'mapbox://styles/mapbox/light-v11',
-        center: [-74.006, 40.7128],
+        style: 'mapbox://styles/mapbox/streets-v11',
+        center: initialCenter as [number, number],
         zoom: 13,
         pitch: 45,
         bearing: 0,
@@ -41,11 +57,45 @@ const Map: React.FC<MapProps> = ({ graph, route, mapboxToken }) => {
         'top-right'
       );
       
+      // Add geolocate control
+      const geolocateControl = new mapboxgl.GeolocateControl({
+        positionOptions: {
+          enableHighAccuracy: true
+        },
+        trackUserLocation: true,
+        showUserHeading: true
+      });
+      
+      newMap.addControl(geolocateControl, 'top-right');
+      
       // Add scale
       newMap.addControl(new mapboxgl.ScaleControl(), 'bottom-right');
 
+      // Add click event for location selection
+      newMap.on('click', (e) => {
+        if (selectionMode && onLocationSelect) {
+          onLocationSelect(e.lngLat.lng, e.lngLat.lat, selectionMode);
+          setSelectionMode(null); // Reset selection mode after selecting
+          
+          // Change cursor back to default
+          if (map.current) {
+            map.current.getCanvas().style.cursor = '';
+          }
+          
+          toast({
+            title: `Location Selected`,
+            description: selectionMode === 'start' ? 
+              "Starting point has been set." : 
+              "Destination has been added.",
+          });
+        }
+      });
+
       newMap.on('load', () => {
         setMapReady(true);
+        
+        // Trigger geolocate on load if available
+        geolocateControl.trigger();
       });
 
       newMap.on('error', (e) => {
@@ -72,12 +122,24 @@ const Map: React.FC<MapProps> = ({ graph, route, mapboxToken }) => {
     }
   }, [mapboxToken]);
 
-  // Add markers for all points
+  // Update cursor when in selection mode
+  useEffect(() => {
+    if (!map.current) return;
+    
+    if (selectionMode) {
+      map.current.getCanvas().style.cursor = 'crosshair';
+    } else {
+      map.current.getCanvas().style.cursor = '';
+    }
+  }, [selectionMode]);
+
+  // Add markers for all points and update when graph changes
   useEffect(() => {
     if (!map.current || !mapReady) return;
 
-    // Create an array to track added markers for cleanup
-    const markers: mapboxgl.Marker[] = [];
+    // Clear existing markers
+    markersRef.current.forEach(marker => marker.remove());
+    markersRef.current = [];
 
     // Add markers for all points
     Object.values(graph.points).forEach((point) => {
@@ -91,7 +153,7 @@ const Map: React.FC<MapProps> = ({ graph, route, mapboxToken }) => {
       // Style based on point type
       if (point.id === 'A') {
         inner.className += ' bg-primary text-white';
-        inner.textContent = 'P';
+        inner.textContent = 'S';
       } else {
         inner.className += ' bg-secondary text-foreground';
         inner.textContent = point.id;
@@ -112,14 +174,47 @@ const Map: React.FC<MapProps> = ({ graph, route, mapboxToken }) => {
         .setPopup(popup)
         .addTo(map.current);
       
-      markers.push(marker);
+      markersRef.current.push(marker);
     });
-
-    // Cleanup function
-    return () => {
-      markers.forEach(marker => marker.remove());
-    };
   }, [graph.points, mapReady]);
+
+  // Update user location marker
+  useEffect(() => {
+    if (!map.current || !mapReady || !userLocation) return;
+    
+    // Remove existing user marker if it exists
+    if (userLocationMarkerRef.current) {
+      userLocationMarkerRef.current.remove();
+    }
+    
+    // Create user location marker
+    const el = document.createElement('div');
+    el.className = 'flex items-center justify-center w-10 h-10';
+    
+    // Add pulsing effect
+    const pulse = document.createElement('div');
+    pulse.className = 'absolute w-10 h-10 bg-blue-500/20 rounded-full animate-ping';
+    el.appendChild(pulse);
+    
+    // Add center point
+    const center = document.createElement('div');
+    center.className = 'absolute w-6 h-6 bg-blue-500 rounded-full flex items-center justify-center';
+    center.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-white" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 9a3 3 0 100-6 3 3 0 000 6zm-7 9a7 7 0 1114 0H3z" clip-rule="evenodd" /></svg>';
+    el.appendChild(center);
+    
+    // Create and add the marker
+    userLocationMarkerRef.current = new mapboxgl.Marker(el)
+      .setLngLat([userLocation.lng, userLocation.lat])
+      .addTo(map.current);
+    
+    // Center map on user location if this is initial location
+    map.current.flyTo({
+      center: [userLocation.lng, userLocation.lat],
+      zoom: 14,
+      duration: 2000
+    });
+    
+  }, [userLocation, mapReady]);
 
   // Draw route path
   useEffect(() => {
@@ -253,9 +348,53 @@ const Map: React.FC<MapProps> = ({ graph, route, mapboxToken }) => {
     // No cleanup needed for this animation as it will be replaced in the next render
   }, [graph.points, route, mapReady]);
 
+  const handleSetStartingPoint = () => {
+    setSelectionMode('start');
+    toast({
+      title: "Select Starting Point",
+      description: "Click on the map to set your starting location.",
+    });
+  };
+
+  const handleAddDestination = () => {
+    setSelectionMode('destination');
+    toast({
+      title: "Select Destination",
+      description: "Click on the map to add a destination point.",
+    });
+  };
+
   return (
     <div className="h-full w-full relative">
       <div ref={mapContainer} className="map-container" />
+      
+      {/* Map controls */}
+      {mapboxToken && mapReady && (
+        <div className="absolute bottom-4 left-4 flex flex-col space-y-2">
+          <button 
+            onClick={handleSetStartingPoint}
+            className="flex items-center justify-center bg-white p-2 rounded-full shadow-md hover:bg-gray-100 transition-colors"
+            title="Set starting point"
+          >
+            <Navigation className="h-5 w-5 text-primary" />
+          </button>
+          <button 
+            onClick={handleAddDestination}
+            className="flex items-center justify-center bg-white p-2 rounded-full shadow-md hover:bg-gray-100 transition-colors"
+            title="Add destination"
+          >
+            <MapPin className="h-5 w-5 text-destructive" />
+          </button>
+        </div>
+      )}
+      
+      {/* Selection mode indicator */}
+      {selectionMode && (
+        <div className="absolute top-4 left-1/2 transform -translate-x-1/2 bg-white px-4 py-2 rounded-full shadow-md text-sm font-medium">
+          {selectionMode === 'start' ? 'Click to set starting point' : 'Click to add destination'}
+        </div>
+      )}
+      
       {!mapboxToken && (
         <div className="absolute inset-0 flex items-center justify-center bg-background/80 backdrop-blur-sm">
           <div className="text-center p-6 rounded-lg bg-white shadow-lg">
